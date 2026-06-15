@@ -1693,7 +1693,7 @@ def databases(show_database_search = False):
 
             # with cols2:
             #     image = Image.open("images/Rabbit2.png")
-            #     st.image(image, use_container_width=True)
+            #     st.image(image, width="stretch")
 
             with cols3:
                 if any(x in st.session_state for x in ['mp_options', 'aflow_options', 'cod_options']):
