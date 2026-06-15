@@ -38,6 +38,38 @@ def ase_to_pymatgen(atoms):
     return Structure(lattice, symbols, positions, coords_are_cartesian=True)
 
 
+def direction_to_miller(atoms, uvw):
+    """Convert a real-space lattice direction [u v w] to the Miller indices (h k l)
+    of the plane perpendicular to it.
+
+    ASE's surface() takes Miller indices of the plane that lies parallel to the
+    surface (surface normal along the reciprocal vector g_hkl). To make a real-space
+    direction [uvw] perpendicular to the surface instead, we need the plane whose
+    normal is along [uvw]. Using the real-space metric tensor G = A.Aᵀ, that plane is
+    (h k l) = G·[u v w], reduced to the smallest integer triplet.
+
+    For cubic lattices this returns (uvw) unchanged; for non-cubic lattices the two
+    interpretations differ.
+    """
+    from math import gcd
+    from functools import reduce
+
+    A = np.array(atoms.get_cell())
+    G = A @ A.T
+    hkl = G @ np.array(uvw, dtype=float)
+
+    nonzero = hkl[np.abs(hkl) > 1e-6]
+    if nonzero.size == 0:
+        raise ValueError("Direction [u v w] must be non-zero.")
+    hkl = hkl / np.min(np.abs(nonzero))
+    hkl = np.round(hkl).astype(int)
+
+    divisor = reduce(gcd, [abs(int(x)) for x in hkl if x != 0])
+    if divisor > 1:
+        hkl = hkl // divisor
+    return tuple(int(x) for x in hkl)
+
+
 def get_orthogonal_cell(structure, max_atoms=200):
     from pymatgen.transformations.advanced_transformations import CubicSupercellTransformation
     from pymatgen.io.ase import AseAtomsAdaptor
@@ -873,7 +905,7 @@ def render_surface_module():
                 ]
 
                 result_df = pd.DataFrame(result_data, columns=["Property", "Value"])
-                st.dataframe(result_df, use_container_width=True, hide_index=True)
+                st.dataframe(result_df, width="stretch", hide_index=True)
 
             with col_result2:
                 st.write("**Final Lattice Parameters:**")
@@ -890,7 +922,7 @@ def render_surface_module():
                 ]
 
                 lattice_df = pd.DataFrame(lattice_data, columns=["Parameter", "Value"])
-                st.dataframe(lattice_df, use_container_width=True, hide_index=True)
+                st.dataframe(lattice_df, width="stretch", hide_index=True)
 
             combined_atoms = pymatgen_to_ase(combined_structure)
             visualize_surface_structure(combined_atoms, "Combined Layered Structure")
@@ -1160,7 +1192,7 @@ def render_surface_module():
                     "Fraction": f"{amt / comp.num_atoms:.3f}"
                 })
             comp_df = pd.DataFrame(comp_data)
-            st.dataframe(comp_df, use_container_width=True)
+            st.dataframe(comp_df, width="stretch")
 
         with col2:
             st.subheader("🔍 Original Structure Preview")
@@ -1180,10 +1212,43 @@ def render_surface_module():
 
         with col_param1:
             st.write("**Miller Indices**")
-            miller_h = st.number_input("h index:", value=1, min_value=-10, max_value=10, step=1, key="miller_h")
-            miller_k = st.number_input("k index:", value=0, min_value=-10, max_value=10, step=1, key="miller_k")
-            miller_l = st.number_input("l index:", value=0, min_value=-10, max_value=10, step=1, key="miller_l")
-            miller_indices = (miller_h, miller_k, miller_l)
+            index_mode = st.radio(
+                "Interpretation:",
+                ["(hkl) plane ⟂ surface", "[hkl] direction ⟂ surface"],
+                index=0,
+                key="index_mode",
+                help="(hkl) plane: the crystallographic plane lies parallel to the surface "
+                     "(standard convention; surface normal along reciprocal vector g_hkl). "
+                     "[hkl] direction: the real-space lattice direction [hkl] is perpendicular "
+                     "to the surface. Identical for cubic lattices; differ for non-cubic ones."
+            )
+            direction_mode = index_mode.startswith("[hkl]")
+            idx_label = "u" if direction_mode else "h"
+            miller_h = st.number_input(f"{idx_label} index:", value=1, min_value=-10, max_value=10, step=1, key="miller_h")
+            miller_k = st.number_input(f"{'v' if direction_mode else 'k'} index:", value=0, min_value=-10, max_value=10, step=1, key="miller_k")
+            miller_l = st.number_input(f"{'w' if direction_mode else 'l'} index:", value=0, min_value=-10, max_value=10, step=1, key="miller_l")
+            input_indices = (miller_h, miller_k, miller_l)
+
+            if direction_mode:
+                try:
+                    miller_indices = direction_to_miller(atoms, input_indices)
+                    if miller_indices != input_indices:
+                        st.caption(
+                            f"Direction [{miller_h} {miller_k} {miller_l}] → "
+                            f"plane ({miller_indices[0]} {miller_indices[1]} {miller_indices[2]}) "
+                            "(perpendicular plane built by ASE)"
+                        )
+                    else:
+                        st.caption(
+                            f"Direction [{miller_h} {miller_k} {miller_l}] ≡ "
+                            f"plane ({miller_indices[0]} {miller_indices[1]} {miller_indices[2]}) "
+                            "for this lattice"
+                        )
+                except ValueError as e:
+                    st.error(str(e))
+                    miller_indices = input_indices
+            else:
+                miller_indices = input_indices
 
             st.write("**Surface Properties**")
             layers = st.number_input("Number of layers:", value=10, min_value=3, max_value=50, step=1)
@@ -1227,7 +1292,13 @@ def render_surface_module():
             )
 
         st.write("**Preview Parameters:**")
-        st.write(f"• Miller indices: ({miller_h} {miller_k} {miller_l})")
+        if direction_mode:
+            st.write(
+                f"• Direction [{miller_h} {miller_k} {miller_l}] ⟂ surface "
+                f"→ plane ({miller_indices[0]} {miller_indices[1]} {miller_indices[2]})"
+            )
+        else:
+            st.write(f"• Miller indices: ({miller_h} {miller_k} {miller_l})")
         st.write(f"• Supercell dimensions: {nx} × {ny} × {nz}")
         st.write(f"• Estimated atoms in slab: ~{len(atoms) * layers * nx * ny * nz}")
 
@@ -1288,7 +1359,7 @@ def render_surface_module():
                 ]
 
                 info_df = pd.DataFrame(info_data, columns=["Property", "Value"])
-                st.dataframe(info_df, use_container_width=True, hide_index=True)
+                st.dataframe(info_df, width="stretch", hide_index=True)
 
             with col_info2:
                 st.write("**Element Composition:**")
@@ -1301,7 +1372,7 @@ def render_surface_module():
                         "Percentage": f"{100 * count / len(surface_atoms):.1f}%"
                     })
                 comp_df = pd.DataFrame(comp_data)
-                st.dataframe(comp_df, use_container_width=True, hide_index=True)
+                st.dataframe(comp_df, width="stretch", hide_index=True)
 
                 st.write("**Lattice Parameters:**")
                 slab_lattice = ase_to_pymatgen(surface_atoms).lattice
@@ -1314,7 +1385,7 @@ def render_surface_module():
                     ["γ (°)", f"{slab_lattice.gamma:.2f}"]
                 ]
                 lattice_df = pd.DataFrame(lattice_data, columns=["Parameter", "Value"])
-                st.dataframe(lattice_df, use_container_width=True, hide_index=True)
+                st.dataframe(lattice_df, width="stretch", hide_index=True)
 
             if len(surface_atoms) > 100000:
                 st.warning(
